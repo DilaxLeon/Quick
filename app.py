@@ -32,6 +32,7 @@ import whisper
 import numpy as np
 from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, AudioFileClip, concatenate_audioclips, CompositeAudioClip
 from moviepy.config import change_settings
+import moviepy.config as mpc
 from PIL import Image, ImageDraw, ImageFont
 import tempfile
 import shutil
@@ -39,6 +40,17 @@ from werkzeug.utils import secure_filename
 from profanity_list import contains_profanity, find_profane_word, censor_profanity, contains_profane_phrase
 from beep_generator import get_beep_for_duration
 # Speech enhancement feature removed
+
+# Configure ffmpeg binary path for production
+# Check if we're in production environment and set ffmpeg path accordingly
+if os.environ.get('PRODUCTION') == 'true':
+    # Production ffmpeg path - adjust this path based on your production server
+    ffmpeg_path = os.environ.get('FFMPEG_BINARY', '/usr/bin/ffmpeg')
+    mpc.change_settings({"FFMPEG_BINARY": ffmpeg_path})
+    print(f"Production mode: Using ffmpeg binary at {ffmpeg_path}")
+else:
+    # Development mode - let MoviePy find ffmpeg automatically
+    print("Development mode: Using system ffmpeg")
 
 # Global variable to store the Whisper model
 # We'll load it on demand to avoid startup issues
@@ -313,6 +325,7 @@ def check_video_duration(video_path, user_plan='free'):
     
     try:
         clip = VideoFileClip(video_path)
+        clip.fps = clip.fps or 24
         duration = clip.duration
         print(f"Video duration: {duration} seconds (max allowed for {user_plan} plan: {max_duration} seconds)")
         clip.close()
@@ -357,6 +370,7 @@ def convert_webm_to_mp4(input_path, output_path):
 def convert_to_9_16_ratio(input_path, output_path):
     """Convert video to 9:16 aspect ratio using cropping if needed"""
     clip = VideoFileClip(input_path)
+    clip.fps = clip.fps or 24
     
     # Calculate current aspect ratio
     width, height = clip.size
@@ -381,6 +395,7 @@ def convert_to_9_16_ratio(input_path, output_path):
     
     # Crop the video
     cropped_clip = clip.crop(x1=x1, y1=0, width=new_width, height=height)
+    cropped_clip = cropped_clip.set_fps(clip.fps)
     cropped_clip.write_videofile(
         output_path, 
         codec="libx264", 
@@ -640,8 +655,10 @@ def transcribe_video(video_path, filter_profanity=False, preloaded_model=None):
             
             # Extract audio using MoviePy
             video_clip = VideoFileClip(video_path)
-            video_clip.audio.write_audiofile(temp_audio_path, codec='pcm_s16le', logger=None)
-            video_clip.close()
+            video_clip.fps = video_clip.fps or 24
+            # Store original audio before extracting
+            original_audio = video_clip.audio
+            original_audio.write_audiofile(temp_audio_path, codec='pcm_s16le', logger=None)
             
             # Use the censor_content function to process both text and audio
             print("Using precise word-level profanity censoring with beep sounds")
@@ -678,10 +695,10 @@ def transcribe_video(video_path, filter_profanity=False, preloaded_model=None):
                 print(f"\nTotal profane words censored: {censored_count}")
                 print("==================================\n")
                 
-                # Replace the audio in the video
-                video_clip = VideoFileClip(video_path)
+                # Replace the audio in the video (using the preserved video_clip)
                 audio_clip = AudioFileClip(censored_audio_path)
                 video_clip = video_clip.set_audio(audio_clip)
+                video_clip = video_clip.set_fps(video_clip.fps)
                 
                 # Save the video with censored audio
                 censored_video_path = os.path.join(temp_dir, "censored_" + os.path.basename(video_path))
@@ -712,6 +729,10 @@ def transcribe_video(video_path, filter_profanity=False, preloaded_model=None):
                     video_path = censored_video_path
                 else:
                     print("Warning: Censored video file was not created successfully")
+            else:
+                # No profanity found, just close the video clip since we don't need to modify it
+                print("No profanity detected in audio")
+                video_clip.close()
             
             # Clean up temporary audio files
             try:
@@ -2263,6 +2284,7 @@ def process_video(input_path, options=None, preloaded_model=None):
             # Load the video
             print(f"Loading video from: {converted_path}")
             original_clip = VideoFileClip(converted_path)
+            original_clip.fps = original_clip.fps or 24
             original_width, original_height = original_clip.size
             print(f"Original video dimensions: {original_width}x{original_height}")
             
@@ -2292,6 +2314,7 @@ def process_video(input_path, options=None, preloaded_model=None):
                 print(f"Resizing original video from {original_width}x{original_height} to 1080p: {new_width}x{new_height}")
                 try:
                     original_clip = original_clip.resize((new_width, new_height))
+                    original_clip = original_clip.set_fps(original_clip.fps)
                     print(f"Video resized successfully")
                 except Exception as e:
                     print(f"ERROR during video resize: {str(e)}")
@@ -2332,6 +2355,7 @@ def process_video(input_path, options=None, preloaded_model=None):
                     print(f"Resizing original video from {original_width}x{original_height} to 4K: {new_width}x{new_height}")
                     try:
                         original_clip = original_clip.resize((new_width, new_height))
+                        original_clip = original_clip.set_fps(original_clip.fps)
                         print(f"Video resized successfully")
                     except Exception as e:
                         print(f"ERROR during video resize: {str(e)}")
@@ -2425,6 +2449,7 @@ def process_video(input_path, options=None, preloaded_model=None):
                     print(f"Resizing clip to lower resolution")
                     try:
                         resized_clip = original_clip.resize((fallback_width, fallback_height))
+                        resized_clip = resized_clip.set_fps(original_clip.fps)
                         print(f"Resize successful")
                     except Exception as resize_error:
                         print(f"ERROR during fallback resize: {str(resize_error)}")
@@ -2511,6 +2536,7 @@ def process_video(input_path, options=None, preloaded_model=None):
         print(f"Processing for free plan (720p)")
         print(f"Loading video from: {converted_path}")
         original_clip = VideoFileClip(converted_path)
+        original_clip.fps = original_clip.fps or 24
         original_width, original_height = original_clip.size
         print(f"Original video dimensions: {original_width}x{original_height}")
         
@@ -2530,6 +2556,7 @@ def process_video(input_path, options=None, preloaded_model=None):
             # Resize to 720p
             print(f"Resizing original video from {original_width}x{original_height} to 720p: {new_width}x{new_height}")
             resized_clip = original_clip.resize((new_width, new_height))
+            resized_clip = resized_clip.set_fps(original_clip.fps)
             
             # Write with basic settings
             resized_clip.write_videofile(
@@ -2684,6 +2711,7 @@ def add_captions_to_video(video_path, output_path, phrases, template="minimal_wh
         user_plan: The user's subscription plan ("free", "basic", or "pro")
     """
     video = VideoFileClip(video_path)
+    video.fps = video.fps or 24
     video_size = video.size
     
     caption_clips = []
@@ -3033,6 +3061,7 @@ def add_captions_to_video(video_path, output_path, phrases, template="minimal_wh
                         # Resize to a reasonable size (20% of video width)
                         watermark_width = int(video_size[0] * 0.20)
                         watermark_clip = watermark_clip.resize(width=watermark_width)
+                        watermark_clip = watermark_clip.set_fps(video.fps)
                         
                         # Set opacity to 0.7
                         watermark_clip = watermark_clip.set_opacity(0.7)
@@ -3078,6 +3107,7 @@ def add_captions_to_video(video_path, output_path, phrases, template="minimal_wh
             clips_to_combine.append(watermark_clip)
             
         final_video = CompositeVideoClip(clips_to_combine)
+        final_video = final_video.set_fps(video.fps)
         
         # Get original dimensions
         original_width, original_height = final_video.size
@@ -3100,6 +3130,7 @@ def add_captions_to_video(video_path, output_path, phrases, template="minimal_wh
             # Resize to 1080p
             print(f"Resizing video from {original_width}x{original_height} to 1080p: {new_width}x{new_height}")
             final_video = final_video.resize((new_width, new_height))
+            final_video = final_video.set_fps(video.fps)
             
         elif user_plan.lower() == "pro":
             try:
@@ -3125,6 +3156,7 @@ def add_captions_to_video(video_path, output_path, phrases, template="minimal_wh
                     # Resize to 4K (safer than 8K)
                     print(f"Resizing video from {original_width}x{original_height} to 4K: {new_width}x{new_height}")
                     final_video = final_video.resize((new_width, new_height))
+                    final_video = final_video.set_fps(video.fps)
             except Exception as e:
                 print(f"Error during video resizing: {str(e)}")
                 print("Falling back to original video dimensions")
@@ -3148,6 +3180,7 @@ def add_captions_to_video(video_path, output_path, phrases, template="minimal_wh
             print(f"Resizing video from {original_width}x{original_height} to 720p: {new_width}x{new_height}")
             try:
                 final_video = final_video.resize((new_width, new_height))
+                final_video = final_video.set_fps(video.fps)
             except Exception as e:
                 print(f"Error resizing free plan video: {str(e)}")
                 # If resizing fails, just ensure dimensions are even
@@ -3155,6 +3188,7 @@ def add_captions_to_video(video_path, output_path, phrases, template="minimal_wh
                 if width != original_width or height != original_height:
                     try:
                         final_video = final_video.resize((width, height))
+                        final_video = final_video.set_fps(video.fps)
                     except:
                         print("Falling back to original dimensions")
         
@@ -3251,6 +3285,7 @@ def api_debug():
         if test_video_path and os.path.exists(test_video_path):
             try:
                 clip = VideoFileClip(test_video_path)
+                clip.fps = clip.fps or 24
                 video_info = {
                     "duration": clip.duration,
                     "size": clip.size,
@@ -4397,6 +4432,7 @@ def get_ass_captions(filename):
     if os.path.exists(video_path):
         try:
             with VideoFileClip(video_path) as clip:
+                clip.fps = clip.fps or 24
                 video_width, video_height = clip.size
         except Exception as e:
             print(f"Error getting video dimensions: {e}")
@@ -4874,6 +4910,7 @@ def reprocess_video():
                 if user_plan.lower() in ["basic", "pro"]:
                     # Load the video
                     original_clip = VideoFileClip(original_video_path)
+                    original_clip.fps = original_clip.fps or 24
                     original_width, original_height = original_clip.size
                     
                     # Check if we need to resize based on current dimensions
@@ -4903,6 +4940,7 @@ def reprocess_video():
                             # Resize to 4K
                             print(f"Resizing original video from {original_width}x{original_height} to 4K: {new_width}x{new_height}")
                             original_clip = original_clip.resize((new_width, new_height))
+                            original_clip = original_clip.set_fps(original_clip.fps)
                             
                         elif user_plan.lower() == "pro":
                             try:
@@ -4928,6 +4966,7 @@ def reprocess_video():
                                     # Resize to 4K (safer than 8K)
                                     print(f"Resizing original video from {original_width}x{original_height} to 4K: {new_width}x{new_height}")
                                     original_clip = original_clip.resize((new_width, new_height))
+                                    original_clip = original_clip.set_fps(original_clip.fps)
                             except Exception as e:
                                 print(f"Error during video resizing: {str(e)}")
                                 print("Falling back to original video dimensions")
@@ -4963,6 +5002,7 @@ def reprocess_video():
                 else:
                     # For free plan, resize to 720p
                     original_clip = VideoFileClip(original_video_path)
+                    original_clip.fps = original_clip.fps or 24
                     original_width, original_height = original_clip.size
                     
                     # Check if we need to resize
@@ -4983,6 +5023,7 @@ def reprocess_video():
                             # Resize to 720p
                             print(f"Resizing video from {original_width}x{original_height} to 720p: {new_width}x{new_height}")
                             resized_clip = original_clip.resize((new_width, new_height))
+                            resized_clip = resized_clip.set_fps(original_clip.fps)
                             
                             # Write with basic settings
                             resized_clip.write_videofile(
@@ -5022,6 +5063,7 @@ def reprocess_video():
                 print(f"Original video not found, extracting from processed video: {original_video_path}")
                 # Try to get the original video by extracting just the video stream without captions
                 original_clip = VideoFileClip(original_video_path)
+                original_clip.fps = original_clip.fps or 24
                 
                 # Get original dimensions
                 original_width, original_height = original_clip.size
@@ -5725,6 +5767,7 @@ def edit_video():
         
         # Load the video using MoviePy
         video = VideoFileClip(video_path)
+        video.fps = video.fps or 24
         
         # Apply trimming if needed
         if start_time > 0 or end_time < video.duration:
@@ -5733,10 +5776,12 @@ def edit_video():
                 end_time = video.duration
                 
             video = video.subclip(start_time, end_time)
+            video = video.set_fps(video.fps)
         
         # Apply volume adjustment
         if volume != 1.0:
             video = video.volumex(volume)
+            video = video.set_fps(video.fps)
         
         # Apply filter effects
         if filter_type != 'none':
@@ -5799,6 +5844,7 @@ def edit_video():
             # Combine video with text overlays
             if text_clips:
                 video = CompositeVideoClip([video] + text_clips)
+                video = video.set_fps(video.fps)
         
         # Write the edited video to file
         video.write_videofile(
